@@ -54,6 +54,7 @@ bool isAlreadyRunning() {
     return false;
 }
 
+// === VALIDATION & INITIALIZATION ===
 bool validateAndConvertTxtToPosNum(const char* txt, int* output) {
     char *endptr;
     *output = (int) strtol(txt, &endptr, 10);
@@ -67,7 +68,7 @@ bool validateAndConvertTxtToPosNum(const char* txt, int* output) {
 }
 
 void initializeState(central_state_t* state) {
-    strcpy(state->bindir, DEFAULT_BINDIR);
+    snprintf(state->bindir, sizeof(state->bindir), "%s", DEFAULT_BINDIR);
     state->maxEstafetas = DEFAULT_ESTAFETAS;
     state->acceptanceWindow = DEFAULT_WINDOW;
 }
@@ -78,11 +79,11 @@ void enrichStateWithEnv(central_state_t* state) {
         printf("CENTRAL_PIPE environment variable either doesnt exist or is empty. Exiting...\n");
         cleanupAndExit(1);
     }
-    strcpy(state->centralPipeName, centralPipe);
+    snprintf(state->centralPipeName, sizeof(state->centarlPipeName), "%s", centralPipe);
 
     char *bindir = getenv("BINDIR");
     if(bindir != NULL) {
-        strcpy(state->bindir, bindir);
+        snprintf(state->bindir, sizeof(state->bindir), "%s", bindir);
     }
 
     char *maxEstafetas = getenv("MAXESTAFETAS");
@@ -110,8 +111,6 @@ void enrichStateWithEnv(central_state_t* state) {
     }
 }
 
-
-
 void enrichStateWithCmdLineArgs(central_state_t* state, int argc, char* argv[]) {
     for(int i = 1; i < argc; i++) {
         if(strcmp(argv[i], "-p") == 0 && i+1 < argc) {
@@ -131,6 +130,58 @@ void enrichStateWithCmdLineArgs(central_state_t* state, int argc, char* argv[]) 
 }
 
 
+void tarifadorSetup(central_state_t* state, int* pipeToTarif, int* pipeFromTarif) {
+    if(pipe(pipeToTarif) < 0) {
+        printf("Creation of pipeToTarif failed. Exiting...\n");
+        cleanupAndExit(1);
+    }
+
+    if(pipe(pipeFromTarif) < 0) {
+        printf("Creation of pipeFromTarif failed. Exiting...\n");
+        cleanupAndExit(1);
+    }
+
+    pid_t p = fork();
+    // error
+    if(p < 0) {
+        perror("fork fail");
+        cleanupAndExit(1);
+    }
+    // child
+    else if(p == 0) {
+        // redirecting stdin & stdout fds to point to the pipes instead of the terminal 
+        dup2(pipeToTarif[0], STDIN_FILENO);
+        dup2(pipeFromTarif[1], STDOUT_FILENO);
+        
+        // close the original pipe file descriptors in the child process
+        // ensures the ref count is lowered so when central closes its ends, tarif receives EOF
+        close(pipeToTarif[0]);
+        close(pipeToTarif[1]);
+        close(pipeFromTarif[0]);
+        close(pipeFromTarif[1]);
+
+        char tarifPath[300];
+        snprintf(tarifPath, sizeof(tarifPath), "%s/tarifador", state->bindir);
+
+        execl(tarifPath, "tarifador", (char*) NULL);
+
+        perror("execl failed");
+        _exit(1); // cleanup here doesnt make sense - parent does it
+
+    }
+    // parent
+    else {
+        // central wont use these ends - read end of toTarif and write end of fromTarif
+        close(pipeToTarif[0]);
+        close(pipeFromTarif[1]);
+
+        // on the other hand we need these
+        state->toTarifFd = pipeToTarif[1];
+        state->fromTarifFd = pipeFromTarif[0];
+        state->tarifPid = p;
+    }
+}
+
 int main(int argc, char *argv[]) {
     signal(SIGINT, handleSignal);
     signal(SIGTERM, handleSignal);
@@ -147,6 +198,13 @@ int main(int argc, char *argv[]) {
 
     printf("Central instance started successfully. Press Ctrl+C to stop.\n");
     printf("Max estafetas: %d\n", state.maxEstafetas);
+
+    int pipeToTarif[2];
+    int pipeFromTarif[2];
+    tarifadorSetup(&state, pipeToTarif, pipeFromTarif);
+    
+
+
     while(keepRunning) {
         sleep(1);
     }
