@@ -79,7 +79,7 @@ void enrichStateWithEnv(central_state_t* state) {
         printf("CENTRAL_PIPE environment variable either doesnt exist or is empty. Exiting...\n");
         cleanupAndExit(1);
     }
-    snprintf(state->centralPipeName, sizeof(state->centarlPipeName), "%s", centralPipe);
+    snprintf(state->centralPipeName, sizeof(state->centralPipeName), "%s", centralPipe);
 
     char *bindir = getenv("BINDIR");
     if(bindir != NULL) {
