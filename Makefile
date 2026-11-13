@@ -16,4 +16,4 @@ gerador:
 		@echo "gerador TBD"
 
 clean:
-		rm. -f central estafeta gerador *.o ./central.lock
+		rm -f central estafeta gerador *.o ./central.lock
