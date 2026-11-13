@@ -9,15 +9,14 @@
 #include <errno.h>
 #include <sys/wait.h>
 
+#include "central.h"
 #include "common.h"
-
-#define LOCK_FILE "./central.lock"
 
 volatile sig_atomic_t keepRunning = 1;
 
 void cleanupAndExit(int sig) {
-    const char *msg = "\ncleanupAndExit executed\n";
-    write(STDOUT_FILENO, msg, strlen(msg));
+    // const char *msg = "\ncleanupAndExit executed\n";
+    // write(STDOUT_FILENO, msg, strlen(msg));
     
     // unlink (therefore delete after end of this process) our link file so future runs can run
     unlink(LOCK_FILE);
@@ -25,8 +24,8 @@ void cleanupAndExit(int sig) {
 }
 
 void handleSignal(int sig) {
-    const char *msg = "\nhandleSignal executed";
-    write(STDOUT_FILENO, msg, strlen(msg));
+    // const char *msg = "\nhandleSignal executed";
+    // write(STDOUT_FILENO, msg, strlen(msg));
     keepRunning = 0;
 }
 
@@ -77,10 +76,7 @@ bool isAlreadyRunning() {
 bool validateAndConvertTxtToPosNum(const char* txt, int* output) {
     char *endptr;
     *output = (int) strtol(txt, &endptr, 10);
-    if(*endptr != '\0'){
-        return false;
-    }
-    else if(*output <= 0) {
+    if(*endptr != '\0' || *output <= 0){
         return false;
     }
     return true;
@@ -103,7 +99,7 @@ void initializeState(central_state_t* state) {
 void enrichStateWithEnv(central_state_t* state) {
     char *centralPipe = getenv("CENTRAL_PIPE");
     if(centralPipe == NULL || strlen(centralPipe) == 0) {
-        printf("CENTRAL_PIPE environment variable either doesnt exist or is empty. Exiting...\n");
+        printf("[Error]: CENTRAL_PIPE environment variable either doesnt exist or is empty. Exiting...\n");
         cleanupAndExit(1);
     }
     snprintf(state->centralPipeName, sizeof(state->centralPipeName), "%s", centralPipe);
@@ -120,7 +116,7 @@ void enrichStateWithEnv(central_state_t* state) {
             state->maxEstafetas = output;
         }
         else {
-            printf("Wrong value in MAXESTAFETAS env. var. value: non-number. Exiting...\n");
+            printf("[Error]: Wrong value in MAXESTAFETAS env. var. value: non-number. Exiting...\n");
             cleanupAndExit(1);
         }
     }
@@ -132,7 +128,7 @@ void enrichStateWithEnv(central_state_t* state) {
             state->acceptanceWindow = output;
         }
         else {
-            printf("Wrong value in PRAZOACEITA env. var. value: non-number. Exiting...\n");
+            printf("[Error]: Wrong value in PRAZOACEITA env. var. value: non-number. Exiting...\n");
             cleanupAndExit(1);
         }
     }
@@ -141,17 +137,31 @@ void enrichStateWithEnv(central_state_t* state) {
 void enrichStateWithCmdLineArgs(central_state_t* state, int argc, char* argv[]) {
     for(int i = 1; i < argc; i++) {
         if(strcmp(argv[i], "-p") == 0 && i+1 < argc) {
+            i++; // shift to its argument
             int output = -1;
-            if(validateAndConvertTxtToPosNum(argv[i+1], &output)) {
+            if(validateAndConvertTxtToPosNum(argv[i], &output)) {
                 state->acceptanceWindow = output;
+            }
+            else {
+                printf("[Error]: Value after -p could not be converted to a number. Exiting...\n");
+                cleanupAndExit(1);
+            }
+        }
+        else if(strcmp(argv[i], "-m") == 0 && i+1 < argc) {
+            i++; // shift to its argument
+            int output = -1;
+            if(validateAndConvertTxtToPosNum(argv[i], &output)) {
+                state->maxEstafetas = output;
+            }
+            else {
+                printf("[Error]: Value after -m could not be converted to a number. Exiting...\n");
+                cleanupAndExit(1);
             }
         }
 
-        if(strcmp(argv[i], "-m") == 0 && i+1 < argc) {
-            int output = -1;
-            if(validateAndConvertTxtToPosNum(argv[i+1], &output)) {
-                state->maxEstafetas = output;
-            }
+        else {
+            printf("[Error]: Unknown argument. Exiting...\n");
+            cleanupAndExit(1);
         }
     }
 }
@@ -218,6 +228,15 @@ void tarifadorSetup(central_state_t* state, int* pipeToTarif, int* pipeFromTarif
     }
 }
 
+bool validateNoArgCmd(char* lineBuf) {
+    char command[32];
+    char garbage[32];
+    if (sscanf(lineBuf, "%31s %31s", command, garbage) != 1) {
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char *argv[]) {
     setupSignalHandlers();
 
@@ -241,6 +260,11 @@ int main(int argc, char *argv[]) {
     while(keepRunning) {
         char lineBuf[256];
         if(fgets(lineBuf, sizeof(lineBuf), stdin) == NULL) {
+            // ctrl+D should just break to still end tarifador and prevent zombie 
+            if (feof(stdin)) {
+                break;
+            }
+            // after SIGINT, let the loop loop around bcs keepRunning is already 0
             if(errno == EINTR) {
                 continue;
             }
@@ -248,7 +272,12 @@ int main(int argc, char *argv[]) {
             cleanupAndExit(1);
         }
         char command[32];
-        sscanf(lineBuf, "%31s", command);
+        // skip invalids
+        if(sscanf(lineBuf, "%31s", command) != 1) {
+            continue;
+        }
+
+        // debug cmd req: <origin> <destination> <weight>
         if(strcmp(command, "request") == 0) {
             char cmd[32];
             char origin[32];
@@ -256,9 +285,18 @@ int main(int argc, char *argv[]) {
             float weight;
             char garbage[32];
             if(sscanf(lineBuf, "%31s %31s %31s %f %31s", cmd, origin, destination, &weight, garbage) != 4) {
-                printf("Incorrect arguments used after Request command.\n Usage: request <origin> <destination> <weight>\n");
+                printf("[Error]: Incorrect arguments used after Request command.\n Usage: request <origin> <destination> <weight>\n");
                 continue;
             }
+            if(weight <= 0) {
+                printf("[Error]: weight argument after request cmd has non-positive value.\n Usage: request <origin> <destination> <weight>\n");
+                continue;
+            }
+            if(strlen(origin) >= MAX_ORIGIN_DEST || strlen(destination) >= MAX_ORIGIN_DEST) {
+                printf("[Error]: origin or destination argument after request cmd has exceeded 15 chars limit.\n Usage: request <origin> <destination> <weight>\n");
+                continue;
+            }
+
             char toSend[128];
             snprintf(toSend, sizeof(toSend), "%s %s %f\n", origin, destination, weight);
 
@@ -283,12 +321,67 @@ int main(int argc, char *argv[]) {
                 state.totalReceived++;
             }
         }
+
         else if(strcmp(command, "stats") == 0){
-            printStats(&state);
+            if(validateNoArgCmd(lineBuf)) {
+                printStats(&state);
+            }
+            else {
+                printf("[Error]: stats command accepts no arguments. Try again\n");
+            }
         }
 
         else if(strcmp(command, "shutdown") == 0) {
-            keepRunning = 0;
+            if(validateNoArgCmd(lineBuf)) {
+                printf("Shutdown command received. Shutting down...\n");
+                keepRunning = 0;
+            }
+            else {
+                printf("[Error]: shutdown command accepts no arguments. Try again\n");
+            }
+            
+        }
+
+        else if(strcmp(command, "requests") == 0) {
+            if(validateNoArgCmd(lineBuf)) {
+                printf("No active requests\n");
+            }
+            else {
+                printf("[Error]: requests command accepts no arguments. Try again\n");
+            }
+        }
+
+        else if(strcmp(command, "couriers") == 0) {
+            if(validateNoArgCmd(lineBuf)) {
+                printf("No connected couriers\n");
+            }
+            else {
+                printf("[Error]: couriers command accepts no arguments. Try again\n");
+            }
+        }
+        
+        else if(strcmp(command, "window") == 0) {
+            char cmd[32];
+            char arg[32];
+            char garbage[32];
+
+            if(sscanf(lineBuf, "%31s %31s %31s", cmd, arg, garbage) != 2) {
+                printf("[Error]: Incorrect arguments used after Window command.\n Usage: Window <n>\n");
+                continue;
+            }
+
+            int output = -1;
+            if(validateAndConvertTxtToPosNum(arg, &output)) {
+                state.acceptanceWindow = output;
+                printf("Window command processed, acceptance window has been changed to %d seconds\n", output);
+            }
+            else {
+                printf("[Error]: Could not convert to number the argument after the Window command. Try again\n");
+                continue;
+            }
+        }
+        else {
+            printf("[Error]: Unknown command\n");
         }
     }
 
@@ -308,3 +401,10 @@ int main(int argc, char *argv[]) {
     cleanupAndExit(0);
     return 0;
 }
+
+/*
+
+Unknown commands, or commands
+with invalid parameters, produce an error message and do not affect the operation of the system. Every command
+must give feedback on the terminal indicating whether the operation succeeded or failed.
+*/
