@@ -6,7 +6,7 @@ all: central
 debug: CFLAGS += -DDEBUG -g
 debug: all
 
-central: central.c common.h
+central: central.c central.h common.h
 		$(CC) $(CFLAGS) central.c -o central
 
 estafeta:
